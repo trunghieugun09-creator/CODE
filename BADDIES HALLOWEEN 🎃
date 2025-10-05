@@ -1,0 +1,232 @@
+-- SERVICES
+local Players = game:GetService("Players")
+local RunService = game:GetService("RunService")
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+
+-- VARIABLES
+local player = Players.LocalPlayer
+local SCHOOL_CFRAME = CFrame.new(292.9, 8.8, 154.1)
+local BUYINGPAN_CFRAME = CFrame.new(414.3, 8.4, -179.2)
+local gui = Instance.new("ScreenGui", player:WaitForChild("PlayerGui"))
+gui.Name = "MainGUI"
+gui.ResetOnSpawn = false
+
+-- UI SETUP
+local function createUI()
+    local frame = Instance.new("Frame")
+    frame.Size = UDim2.fromOffset(220, 320)
+    frame.Position = UDim2.fromOffset(100, 150)
+    frame.BackgroundColor3 = Color3.fromRGB(30, 30, 30)
+    frame.BackgroundTransparency = 0.15
+    frame.Active = true
+    frame.Draggable = true
+    frame.Parent = gui
+    Instance.new("UICorner", frame).CornerRadius = UDim.new(0, 12)
+
+    local toggleBtn = Instance.new("TextButton")
+    toggleBtn.Size = UDim2.fromOffset(40, 25)
+    toggleBtn.Position = UDim2.fromOffset(0, -30)
+    toggleBtn.Text = "-"
+    toggleBtn.Font = Enum.Font.GothamBold
+    toggleBtn.TextSize = 18
+    toggleBtn.BackgroundColor3 = Color3.fromRGB(80, 80, 80)
+    toggleBtn.TextColor3 = Color3.fromRGB(255, 255, 255)
+    toggleBtn.Parent = frame
+    Instance.new("UICorner", toggleBtn).CornerRadius = UDim.new(0, 8)
+
+    local closeBtn = Instance.new("TextButton")
+    closeBtn.Size = UDim2.fromOffset(40, 25)
+    closeBtn.Position = UDim2.fromOffset(45, -30)
+    closeBtn.Text = "X"
+    closeBtn.Font = Enum.Font.GothamBold
+    closeBtn.TextSize = 18
+    closeBtn.BackgroundColor3 = Color3.fromRGB(150, 50, 50)
+    closeBtn.TextColor3 = Color3.fromRGB(255, 255, 255)
+    closeBtn.Parent = frame
+    Instance.new("UICorner", closeBtn).CornerRadius = UDim.new(0, 8)
+    closeBtn.MouseButton1Click:Connect(function()
+        frame.Visible = false
+    end)
+
+    local note = Instance.new("TextLabel")
+    note.Size = UDim2.fromOffset(120, 25)
+    note.Position = UDim2.fromOffset(90, -30)
+    note.BackgroundTransparency = 1
+    note.Text = "Một Ngày Tốt Nhé"
+    note.Font = Enum.Font.Gotham
+    note.TextSize = 14
+    note.TextColor3 = Color3.fromRGB(255, 255, 255)
+    note.Parent = frame
+
+    local function makeBtn(text, y)
+        local btn = Instance.new("TextButton")
+        btn.Size = UDim2.fromOffset(180, 35)
+        btn.Position = UDim2.fromOffset(20, y)
+        btn.Text = text
+        btn.Font = Enum.Font.GothamMedium
+        btn.TextSize = 15
+        btn.BackgroundColor3 = Color3.fromRGB(50, 50, 50)
+        btn.TextColor3 = Color3.fromRGB(235, 235, 235)
+        btn.Parent = frame
+        Instance.new("UICorner", btn).CornerRadius = UDim.new(0, 10)
+        return btn
+    end
+
+    return frame, toggleBtn, makeBtn
+end
+
+local frame, toggleBtn, makeBtn = createUI()
+
+-- TELEPORT BUTTONS
+local function safeTP(cf)
+    local char = player.Character or player.CharacterAdded:Wait()
+    local hrp = char:WaitForChild("HumanoidRootPart")
+    hrp.CFrame = cf + Vector3.new(0, 3, 0)
+end
+
+local tpSchoolBtn = makeBtn("🎪 CARNIVAL", 20)
+tpSchoolBtn.MouseButton1Click:Connect(function()
+    safeTP(SCHOOL_CFRAME)
+    tpSchoolBtn.Text = "✅ SUCCESS"
+    task.delay(1.5, function() tpSchoolBtn.Text = "🎪 CARNIVAL" end)
+end)
+
+local tpBuypanBtn = makeBtn("🍳 BUY PAN", 65)
+tpBuypanBtn.MouseButton1Click:Connect(function()
+    safeTP(BUYINGPAN_CFRAME)
+    tpBuypanBtn.Text = "✅ SUCCESS"
+    task.delay(1.5, function() tpBuypanBtn.Text = "🍳 BUY PAN" end)
+end)
+
+-- AUTO FARM SETUP
+local autoPanBtn = makeBtn("🍬 FARM CANDY: OFF", 110)
+local autoPan = false
+local currentSpeed, fightSpeed = 16, 26
+local hoverConn, hitTask, watchConn, targetNPC
+
+local function getNearestZombie()
+    local char = player.Character
+    if not char or not char:FindFirstChild("HumanoidRootPart") then return nil end
+    local pos = char.HumanoidRootPart.Position
+    local nearest, closestDist = nil, math.huge
+    for _, model in ipairs(workspace:GetDescendants()) do
+        if model:IsA("Model") and model:FindFirstChild("HumanoidRootPart") then
+            local hum = model:FindFirstChildOfClass("Humanoid")
+            if hum and hum.Health > 0 and model.Name:find("Zombie") then
+                local dist = (model.HumanoidRootPart.Position - pos).Magnitude
+                if dist < closestDist then
+                    closestDist = dist
+                    nearest = model
+                end
+            end
+        end
+    end
+    return nearest
+end
+
+local function ensurePanEquipped()
+    local char = player.Character
+    if not char then return end
+    local bp = player:FindFirstChild("Backpack")
+    if not bp then return end
+    if char:FindFirstChildOfClass("Tool") then return end
+    local tool = bp:FindFirstChild("Pan") or bp:FindFirstChildWhichIsA("Tool")
+    if tool then tool.Parent = char end
+end
+
+local function firePanHits()
+    local tool = player.Character and player.Character:FindFirstChildOfClass("Tool")
+    if tool then
+        tool:Activate()
+        task.wait()
+        tool:Activate()
+    end
+    for _, event in ipairs(ReplicatedStorage:GetDescendants()) do
+        if event:IsA("RemoteEvent") and (event.Name:lower():find("pan") or event.Name:lower():find("hit")) then
+            pcall(function() event:FireServer() end)
+        end
+    end
+end
+
+local function stopAutoPan()
+    autoPan = false
+    autoPanBtn.Text = "🍬 FARM CANDY: OFF"
+    if player.Character then
+        local hum = player.Character:FindFirstChildOfClass("Humanoid")
+        if hum then hum.WalkSpeed = currentSpeed end
+    end
+    if hoverConn then hoverConn:Disconnect() hoverConn = nil end
+    if watchConn then watchConn:Disconnect() watchConn = nil end
+    targetNPC = nil
+end
+
+autoPanBtn.MouseButton1Click:Connect(function()
+    autoPan = not autoPan
+    if not autoPan then stopAutoPan() return end
+
+    autoPanBtn.Text = "🍬 FARM CANDY: ON"
+    local char = player.Character or player.CharacterAdded:Wait()
+    local hrp = char:WaitForChild("HumanoidRootPart")
+    local hum = char:WaitForChild("Humanoid")
+    currentSpeed = hum.WalkSpeed
+    hum.WalkSpeed = fightSpeed
+
+    targetNPC = getNearestZombie()
+    if not targetNPC then stopAutoPan() return end
+
+    -- Move to target (dính phía sau)
+    hoverConn = RunService.RenderStepped:Connect(function()
+        if not autoPan then return end
+        local targetRoot = targetNPC:FindFirstChild("HumanoidRootPart")
+        if targetRoot and hrp then
+            local desiredPos = (targetRoot.CFrame * CFrame.new(0, 0, 3)).Position
+            local currentPos = hrp.Position
+            if (currentPos - desiredPos).Magnitude > 0.5 then
+                hrp.CFrame = CFrame.new(desiredPos, targetRoot.Position)
+            end
+            hrp.AssemblyLinearVelocity = Vector3.zero
+            hrp.AssemblyAngularVelocity = Vector3.zero
+        end
+    end)
+
+    -- Damage loop
+    hitTask = task.spawn(function()
+        while autoPan and targetNPC do
+            ensurePanEquipped()
+            firePanHits()
+            task.wait(0.2)
+        end
+    end)
+
+    -- Watch health & tìm mục tiêu mới
+    watchConn = RunService.Heartbeat:Connect(function()
+        if not autoPan then return end
+        if not targetNPC or not targetNPC:FindFirstChildOfClass("Humanoid") then
+            targetNPC = getNearestZombie()
+            return
+        end
+
+        local hum = targetNPC:FindFirstChildOfClass("Humanoid")
+        if hum and hum.Health <= 0 then
+            local nextZ = getNearestZombie()
+            if nextZ then
+                targetNPC = nextZ
+            else
+                stopAutoPan()
+            end
+        end
+    end)
+end)
+
+-- COLLAPSE TOGGLE
+local collapsed = false
+toggleBtn.MouseButton1Click:Connect(function()
+    collapsed = not collapsed
+    for _, child in ipairs(frame:GetChildren()) do
+        if child:IsA("TextButton") and child ~= toggleBtn then
+            child.Visible = not collapsed
+        end
+    end
+    frame.Size = collapsed and UDim2.fromOffset(220, 50) or UDim2.fromOffset(220, 320)
+    toggleBtn.Text = collapsed and "+" or "-"
+end)
